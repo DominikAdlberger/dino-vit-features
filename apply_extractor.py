@@ -502,7 +502,7 @@ load_size = 202
 
 for j in range(len(scenes)):
     scene = scenes[j]
-    print(str(j+1)+"/"+str(len(scenes)))
+    print("Scene "+str(j+1)+"/"+str(len(scenes)))
     scene_directory = scenes_directory+"\\00"+str(scene)
     save_dir = scene_directory+"\\results\\"
 
