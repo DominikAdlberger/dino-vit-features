@@ -155,7 +155,7 @@ def plotClusters(pil_image, labels_image, save_dir, save_prefix, clustering_name
     clustering_pil.save(comp_file_path)
 
 
-def constructGraph(descriptors, num_patches, load_size, depth_image_path, pil_image, depth_thresh = 20):
+def constructGraph(descriptors, num_patches, load_size, depth_image_path, pil_image, depth_thresh = 30):
     #Reshape descriptor array, such that the dimensions agree with the size of the sampled image (from the ViT)
     descriptors = descriptors.reshape((num_patches[0], num_patches[1], -1))
 
@@ -198,6 +198,7 @@ def constructGraph(descriptors, num_patches, load_size, depth_image_path, pil_im
         G.nodes[n].update({"depth": depth_avg})
 
         G.nodes[n].update({"labels" :[n]})
+        G.nodes[n].update({"count": 1})
 
 
     cos_sim = torch.nn.CosineSimilarity(dim = 0)
@@ -340,12 +341,40 @@ def weight_boundary(graph, src, dst, n):
     """
 
 
-def merge_boundary(graph, src, dst):
-    """Call back called before merging 2 nodes.
 
-    In this case we don't need to do any computation here.
-    """
+
+def merge_boundary(graph,src,dst):
     pass
+
+def weight_func(graph, src, dst, n):
+
+    cos_sim = torch.nn.CosineSimilarity(dim=0)
+
+    descriptor_dst = torch.from_numpy(graph.nodes[dst]["descriptor"])
+
+    descriptor_n = torch.from_numpy(graph.nodes[n]["descriptor"])
+
+    weight_new = 1-cos_sim(descriptor_dst, descriptor_n).numpy()
+
+    return {
+        'weight':weight_new
+    }
+
+
+
+
+def merge_func(graph, src, dst):
+
+    count_src = graph.nodes[src]['count']
+    count_dst = graph.nodes[dst]['count']
+
+    count = count_src + count_dst
+    graph.nodes[dst]["descriptor"] = (graph.nodes[src]["descriptor"]*count_src+graph.nodes[dst]["descriptor"]*count_dst)/count
+    graph.nodes[dst]["count"] = count
+
+    #graph.nodes[src]["descriptor"] = torch.from_numpy((graph.nodes[src]["descriptor"]*count_src+graph.nodes[dst]["descriptor"]*count_dst)/count)
+    #graph.nodes[src]["count"] = count
+
 
 
 def plotLabelsImage(labels, image_pil, kind='avg', save_image = False, save_path=None, title=""):
@@ -424,15 +453,15 @@ def applyMergeHierarchical(G, labels, image_pil, thresh):
     thresh=thresh,
     rag_copy=True,
     in_place_merge=True,
-    merge_func=merge_boundary,
-    weight_func=weight_boundary,
+    merge_func=merge_func,
+    weight_func=weight_func,
     )
 
     return labels_new
     
 def filterSalientLabels(labels_new, saliency_map, num_patches, image_pil, thresh = 0.5):
     
-
+    """
     saliency_map = np.squeeze(saliency_map.reshape((num_patches[0], num_patches[1], -1)))    
     unique_labels = list(np.unique(labels_new))
     labels_salient = np.zeros(labels_new.shape, dtype=labels_new.dtype)
@@ -449,6 +478,20 @@ def filterSalientLabels(labels_new, saliency_map, num_patches, image_pil, thresh
     for label, label_saliency in zip(unique_labels, label_saliency_list):
         if label_saliency > (mean+2*std_dev):
             labels_salient[np.where(labels_new==label)] = label
+
+    """
+    saliency_map = np.squeeze(saliency_map.reshape((num_patches[0], num_patches[1], -1)))
+    unique_labels = list(np.unique(labels_new))
+
+    labels_salient = np.zeros(labels_new.shape, dtype=np.int64)
+    for label in unique_labels:
+        if np.any(saliency_map[labels_new == label]>thresh):
+            salient_cluster = np.where(labels_new == label, labels_new, np.zeros(labels_new.shape, dtype=np.int64))
+            labels_salient += salient_cluster 
+
+    #labels_salient = np.zeros(labels_new.shape, dtype=np.int64)
+    #labels_salient = np.where(saliency_map>=thresh, labels_new, labels_salient)
+    #labels_salient = np.zeros(labels_new[saliency_map>=thresh]
     
 
     return labels_salient
@@ -459,10 +502,11 @@ def applyGrabCut(labels_salient, image_pil, num_patches, load_size):
     unique_labels = np.unique(labels_salient)
 
     final_mask = np.zeros(load_size, dtype=np.uint8)
+    i = 0
     for label in unique_labels:
         if label == 0:
             continue
-
+        i+=1
         resized_mask = np.array(Image.fromarray((labels_salient==label).astype(dtype=np.uint32)).resize((load_size[1], load_size[0]), resample=Image.LANCZOS))
         try:
             # apply grabcut on mask
@@ -483,13 +527,16 @@ def applyGrabCut(labels_salient, image_pil, num_patches, load_size):
             # if mask is unfitted from gb (e.g. all zeros) -- don't apply it
             grabcut_mask = resized_mask.astype('uint8')
 
-        final_mask = final_mask+grabcut_mask
+        #np.where((final_mask > 2) , 0, 1).astype('uint8')
 
+        final_mask = final_mask + np.where(grabcut_mask ==1 , i, 0).astype('uint8')
+
+        #final_mask = final_mask+grabcut_mask
     #grabcut_mask = Image.fromarray(np.array(grabcut_mask, dtype=bool))
     return final_mask
 
-scenes = [4]
-num_pictures = 4
+scenes = [1,2,3,4,5,6]
+num_pictures = 2
 scenes_directory = r'C:\Users\domin\Documents\RobotVisionProject\dino-vit-features\scenes\new\scenes'
 
 model_type = 'dino_vits8'
@@ -504,7 +551,7 @@ for j in range(len(scenes)):
     scene = scenes[j]
     print("Scene "+str(j+1)+"/"+str(len(scenes)))
     scene_directory = scenes_directory+"\\00"+str(scene)
-    save_dir = scene_directory+"\\results\\"
+    save_dir = scene_directory+"\\results_11_05\\"
 
     if Path.exists(Path(save_dir)) == False:
         Path.mkdir(save_dir)
@@ -518,7 +565,7 @@ for j in range(len(scenes)):
     
     plt.ion()
     i = 0
-    for image_association in tqdm(image_associations):
+    for image_association in tqdm(image_associations[:num_pictures]):
         
         image_depth_path, image_rgb_path = image_association.split()
 
@@ -532,7 +579,7 @@ for j in range(len(scenes)):
 
 
         i+=1
-        print(f"working on {i}/{num_pictures}")
+        #print(f"working on {i}/{num_pictures}")
         descriptor = np.squeeze(descriptor)
 
         save_path = save_dir+image_orig_name+"_saliencyMap.png"
@@ -540,7 +587,7 @@ for j in range(len(scenes)):
         
         
 
-        graph, labels = constructGraph(descriptor, num_patches, load_size, image_depth_path, image_pil, depth_thresh = 600)
+        graph, labels = constructGraph(descriptor, num_patches, load_size, image_depth_path, image_pil, depth_thresh = 40)
         save_path = save_dir+image_orig_name+"_graph.png"
         plotGraph(graph, labels, image_pil, save_image = True, save_path=save_path)
 
@@ -548,20 +595,18 @@ for j in range(len(scenes)):
         #save_path = save_dir+image_orig_name+"_normalizedCut.png"
         #plotLabelsImage(labels_new, image_pil, save_image = True, save_path=save_path, title="After normalized Cut")
     
-        labels_new = applyMergeHierarchical(graph, labels, image_pil, thresh=0.4)
+        labels_new = applyMergeHierarchical(graph, labels, image_pil, thresh=0.65)
         save_path = save_dir+image_orig_name+"_mergeHierarchical.png"
         plotLabelsImage(labels_new, image_pil, save_image = True, save_path=save_path, title="After hierarchical merging")
 
-        labels_salient = filterSalientLabels(labels_new, saliency_map, num_patches, image_pil)
+        labels_salient = filterSalientLabels(labels_new, saliency_map, num_patches, image_pil, thresh=0.6)
         save_path = save_dir+image_orig_name+"_salientLabels.png"
         plotLabelsImage(labels_salient, image_pil, save_image = True, save_path=save_path, title="After filtering out unsalient labels")
         
 
         grabcut_mask = applyGrabCut(labels_salient, image_pil, num_patches, load_size)
-        save_path = save_dir+image_orig_name+"_grabcut.png"
+        save_path = save_dir+image_orig_name+"_xgrabcut.png"
         plotLabelsImage(grabcut_mask, image_pil, kind="overlay", save_image = True, save_path=save_path, title="After applying grabcut")
 
-        if i == num_pictures:
-            break
 
 print("Done")
